@@ -123,3 +123,133 @@ To prepare this boilerplate for full-scale production deployment and the Final P
 2. **Automated Testing Suite:** Unit tests for services and utilities alongside integration tests using **Jest** and **Supertest** against an isolated test database (`NODE_ENV=test`) inside the `tests/` folder.
 3. **Interactive API Documentation:** OpenAPI/Swagger specification served at `/api/docs` using `swagger-ui-express` so frontend developers can inspect and test endpoints directly.
 4. **Docker & CI/CD Automation:** A `Dockerfile` and `docker-compose.yml` (orchestrating the Node.js API and MySQL container) paired with a GitHub Actions pipeline to automatically build and run tests on every push.
+<<<<<<< HEAD
+=======
+
+
+
+### 1. Authentication vs. Authorization
+
+* **Authentication (AuthN)** verifies **who** a user is by validating proof of identity (such as an email and password at `/api/auth/login`, biometrics, or a valid JWT). It always happens first.
+* **Authorization (AuthZ)** determines **what** an authenticated user is permitted to access or do based on their roles, ownership, or permissions. It happens after identity is established.
+* **Real-World Example:** At an airport, showing your passport at security proves your identity (**authentication**). Scanning your boarding pass at the gate or lounge determines whether you are allowed to enter First Class or board that specific flight (**authorization**).
+
+---
+
+### 2. Why JWT Is "Stateless" and How That Benefits Scalability
+
+* **Stateless architecture:** A JWT carries all the identity and session metadata the server needs (`userId`, `email`, expiration timestamp `exp`) inside the token itself, protected by a cryptographic signature. The server does not store active session IDs in RAM or look up a session row in MySQL/Redis on every request—it simply verifies the signature math using `JWT_SECRET`.
+* **Scalability benefits:** Because individual Node.js servers hold zero local session state, you can run multiple backend instances behind a load balancer without needing "sticky sessions" (routing a user back to the exact same server) or hitting a shared session database on every API call. Any server instance with the same `JWT_SECRET` can validate any user's token independently.
+
+---
+
+### 3. The Three Parts of a JWT Token
+
+A JWT consists of three Base64URL-encoded JSON strings separated by dots (`header.payload.signature`):
+
+1. **Header:** Describes the token metadata—specifically the token type (`"typ": "JWT"`) and the cryptographic signing algorithm used (e.g., `"alg": "HS256"`).
+2. **Payload:** Contains the **claims**—statements about the user and token lifecycle, including custom application fields (`userId`, `email`) and standard registered claims (`iat` for issued-at time, `exp` for expiration time).
+3. **Signature:** Computed by hashing the encoded Header and Payload together with the server's secret key (`config.jwt.secret`). It guarantees **integrity and authenticity**—if someone edits a single character in the payload (such as changing `userId: 4` to `userId: 1`), the signature verification fails immediately.
+
+---
+
+### 4. Why You Should Never Put Sensitive Data in the JWT Payload
+
+Base64URL encoding is **encoding, not encryption**. Anyone who intercepts or inspects a JWT—via browser DevTools, network logs, proxies, or a decoder like `jwt.io`—can decode the header and payload back into readable plain-text JSON without knowing your `JWT_SECRET`. The secret key only prevents someone from *forging or modifying* the token; it does not hide its contents. Storing passwords, API keys, or personal identification numbers in the payload exposes them directly to anyone who views the token.
+
+---
+
+### 5. How `bcrypt` Protects Passwords (and the Role of "Salt" and "Rounds")
+
+* **One-way adaptive hashing:** `bcrypt` transforms a plain-text password into an irreversible fixed-length hash using the Blowfish cipher. Passwords cannot be decrypted back to plain text; during login (`bcrypt.compare`), `bcrypt` hashes the submitted password using the same salt and checks whether the resulting hash matches the database record.
+* **Salt:** A cryptographically random string generated uniquely for each user and embedded directly into the stored hash string. Even if two users choose the exact same password (`"Password123"`), their stored hashes look completely different, defeating precomputed **rainbow table** lookups and preventing attackers from spotting duplicate passwords.
+* **Rounds (Cost Factor):** Determines how many internal key-stretching iterations ($2^{\text{rounds}}$, e.g., $2^{10} = 1,024$ iterations) `bcrypt` executes. Increasing the rounds makes hashing intentionally slow—barely noticeable for one legitimate login (~60–100 ms), but computationally expensive for an attacker trying to brute-force millions of password guesses per second.
+
+---
+
+### 6. What Happens If a JWT Is Stolen and How to Mitigate the Risk
+
+* **The risk:** JWTs are bearer tokens—whoever possesses the token is treated as that user. Because stateless JWTs are trusted until their `exp` timestamp passes, an attacker with a stolen token can impersonate the victim and call protected routes (`/api/users`, `/api/auth/me`) without knowing their password.
+* **Mitigations:**
+1. **Short expiration times:** Set a short `expiresIn` (e.g., 15 minutes) so a stolen token quickly becomes useless, paired with a refresh token flow.
+2. **Secure client storage:** Store tokens in `HttpOnly`, `Secure`, `SameSite=Strict` cookies rather than `localStorage` so malicious JavaScript (XSS attacks) cannot read the token.
+3. **Token revocation / versioning:** Maintain a Redis deny-list of revoked token IDs (`jti`) on logout/password change, or store a `tokenVersion` integer on the `User` entity and reject tokens whose embedded version no longer matches.
+4. **Enforce HTTPS:** Prevent attackers from sniffing tokens off the network.
+
+
+
+---
+
+### 7. Why HTTPS Is Essential When Transmitting JWT Tokens
+
+On every authenticated request, the client transmits the JWT in plain text inside the `Authorization: Bearer <token>` header. Over unencrypted HTTP, any observer on the network path—such as someone on public Wi-Fi, a compromised router, or an ISP performing a man-in-the-middle (MITM) attack—can read the `Authorization` header in transit, copy the token, and immediately replay it to hijack the user's account. HTTPS wraps the entire HTTP exchange (including headers and JSON bodies) in TLS encryption so third parties cannot read or tamper with the token.
+
+---
+
+### 8. Short-Lived Access Tokens vs. Long-Lived Refresh Tokens
+
+* **Access Token:** A short-lived JWT (e.g., 15 minutes) sent in the `Authorization` header on regular API requests. It is verified statelessly by `authMiddleware` for fast authorization and carries a small window of exposure if leaked.
+* **Refresh Token:** A long-lived credential (e.g., 7 to 30 days) stored securely (typically in an `HttpOnly` cookie and tracked/hashed in the database) whose only job is to obtain a new access token when the old one expires—keeping users signed in without re-entering their password.
+* **When to use each:** Use the **access token** for normal resource requests (`GET /api/users`, `GET /api/auth/me`). When the access token expires and returns `401 TokenExpiredError`, the client sends the **refresh token** to a dedicated `POST /api/auth/refresh` endpoint, where the server checks the database to confirm the token hasn't been revoked and the user's `isActive` flag is still `true` before issuing a fresh access token.
+
+---
+
+### 9. How `authMiddleware` Knows Which User Is Making the Request
+
+In your `src/middleware/auth.ts` implementation, identity flows through four steps without needing a database query on every request:
+
+1. **Header extraction:** `authMiddleware` reads `req.headers.authorization`, confirms it starts with `'Bearer '`, and extracts the raw token string.
+2. **Cryptographic verification:** It calls `AuthService.verifyToken(token)`, which runs `jwt.verify(token, config.jwt.secret)`. If the signature matches your secret and `exp` hasn't passed, `jwt.verify` returns the trusted payload (`{ userId, email }`) that was signed during `AuthService.login`.
+3. **Request attachment:** The middleware assigns that decoded object to `req.user = decoded`.
+4. **Downstream access:** When `next()` hands control to a route handler or controller, `req.user.userId` and `req.user.email` are already available on the `Request` object to identify the caller.
+
+---
+
+### 10. Modifying Your Current Setup for Role-Based Authorization (RBAC)
+
+To enforce roles (such as `admin` vs. `user`) in your boilerplate, you would update four layers:
+
+1. **Database & Entity (`src/entities/User.ts` + Migration):**
+Add a `role` column (defaulting to `'user'`) and generate/run a TypeORM migration:
+```typescript
+export enum UserRole {
+    USER = 'user',
+    ADMIN = 'admin',
+}
+
+@Column({ type: 'enum', enum: UserRole, default: UserRole.USER })
+role: UserRole;
+
+```
+
+
+2. **JWT Payload & Request Types (`src/services/authService.ts` & `src/middleware/auth.ts`):**
+* Include `role: true` in `AuthService.login`'s `select` block and embed `role: user.role` inside `TokenPayload` when signing the token.
+* Extend Express's `Request['user']` interface in `src/middleware/auth.ts` to include `role: UserRole`.
+
+
+3. **Role-Check Middleware (`src/middleware/authorize.ts`):**
+Create a middleware factory that runs *after* `authMiddleware` and throws a `ForbiddenError` (`403 Forbidden`) if the user's role is not permitted:
+```typescript
+export const authorize = (...allowedRoles: UserRole[]) => {
+    return (req: Request, _res: Response, next: NextFunction) => {
+        if (!req.user || !allowedRoles.includes(req.user.role)) {
+            throw new ForbiddenError('Insufficient permissions');
+        }
+        next();
+    };
+};
+
+```
+
+
+4. **Route Rules (`src/routes/userRoutes.ts`):**
+Apply `authorize(UserRole.ADMIN)` to privileged endpoints while keeping general routes open to any authenticated user:
+```typescript
+userRoutes.use(authMiddleware); // All routes require login
+
+userRoutes.get('/', asyncHandler(UserController.getAll)); // Any logged-in user
+userRoutes.delete('/:id', authorize(UserRole.ADMIN), asyncHandler(UserController.delete)); // Admins only
+
+```
+>>>>>>> 1c9608a (feat: add JWT authentication with login and protected routes)

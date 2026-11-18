@@ -27,7 +27,17 @@ export const validate = (
             throw new ValidationError(message, details);
         }
 
-        req[source] = value;
+        if (source === 'query') {
+            Object.defineProperty(req, 'query', {
+                value,
+                writable: true,
+                enumerable: true,
+                configurable: true,
+            });
+        } else {
+            req[source] = value;
+        }
+
         next();
     };
 };

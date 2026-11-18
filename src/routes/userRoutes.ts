@@ -8,8 +8,12 @@ import {
     paginationQuerySchema 
 } from '../dto/user.dto';
 import { asyncHandler } from '../utils/asyncHandler';
+import { authMiddleware } from '../middleware/auth';
 
 export const userRoutes = Router();
+
+// Protect all /api/users routes
+userRoutes.use(authMiddleware);
 
 userRoutes.get(
     '/',

@@ -1,22 +1,7 @@
-import { FindOptionsSelect } from 'typeorm';
+import * as bcrypt from 'bcryptjs';
 import { AppDataSource } from '../config/data-source';
 import { User } from '../entities/User';
-import { NotFoundError, ConflictError } from '../utils/error';
-import bcrypt from 'bcrypt';
-import { createLogger } from '../utils/logger';
-
-const logger = createLogger('UserService');
-const userRepository = AppDataSource.getRepository(User);
-
-const USER_SELECT_FIELDS: FindOptionsSelect<User> = {
-    id: true,
-    name: true,
-    email: true,
-    isActive: true,
-    age: true,
-    createdAt: true,
-    updatedAt: true,
-};
+import { ConflictError, NotFoundError } from '../utils/errors';
 
 interface FindAllOptions {
     page: number;
@@ -26,94 +11,79 @@ interface FindAllOptions {
 }
 
 export class UserService {
-    static async findAll(options: FindAllOptions): Promise<[User[], number]> {
-        const { page, limit, sort, order } = options;
-        const skip = (page - 1) * limit;
+    private static get repo() {
+        return AppDataSource.getRepository(User);
+    }
 
-        return userRepository.findAndCount({
-            select: USER_SELECT_FIELDS,
-            order: { [sort]: order },
-            skip,
+    private static sanitize(user: User): Omit<User, 'password'> {
+        const { password, ...safeUser } = user as User & { password?: string };
+        return safeUser as Omit<User, 'password'>;
+    }
+
+    static async findAll({ page, limit, sort, order }: FindAllOptions): Promise<[Omit<User, 'password'>[], number]> {
+        const [users, total] = await this.repo.findAndCount({
+            skip: (page - 1) * limit,
             take: limit,
+            order: { [sort]: order },
         });
+
+        return [users.map((u) => this.sanitize(u)), total];
     }
 
-    static async findById(id: number): Promise<User> {
-        const user = await userRepository.findOne({
-            where: { id },
-            select: USER_SELECT_FIELDS,
-        });
-
+    static async findById(id: number): Promise<Omit<User, 'password'>> {
+        const user = await this.repo.findOneBy({ id });
         if (!user) {
-            throw new NotFoundError('User', id);
+            throw new NotFoundError(`User with ID ${id} not found`);
         }
-
-        return user;
+        return this.sanitize(user);
     }
 
-    static async create(data: {
-        name: string;
-        email: string;
-        password: string;
-        age?: number;
-    }): Promise<User> {
-        const existing = await userRepository.findOne({
-            where: { email: data.email },
-        });
-
-        if (existing) {
-            throw new ConflictError('A user with this email already exists');
-        }
-
-        const hashedPassword = await bcrypt.hash(data.password, 10);
-
-        const user = userRepository.create({
-            ...data,
-            password: hashedPassword,
-        });
-
-        const savedUser = await userRepository.save(user);
-        delete (savedUser as any).password;
-
-        return savedUser;
-    }
-
-    static async update(id: number, data: Partial<User>): Promise<User> {
-        const user = await userRepository.findOne({ where: { id } });
-
-        if (!user) {
-            throw new NotFoundError('User', id);
-        }
-
-        if (data.email && data.email !== user.email) {
-            const existing = await userRepository.findOne({
-                where: { email: data.email },
-            });
-
+    static async create(data: Partial<User>): Promise<Omit<User, 'password'>> {
+        if (data.email) {
+            const existing = await this.repo.findOneBy({ email: data.email });
             if (existing) {
-                throw new ConflictError('A user with this email already exists');
+                throw new ConflictError('Email already in use');
             }
         }
 
-        if (data.password) {
-            data.password = await bcrypt.hash(data.password, 10);
+        const payload = { ...data };
+        if (payload.password) {
+            payload.password = await bcrypt.hash(payload.password, 10);
         }
 
-        Object.assign(user, data);
+        const user = this.repo.create(payload);
+        const saved = await this.repo.save(user);
+        return this.sanitize(saved);
+    }
 
-        const updatedUser = await userRepository.save(user);
-        delete (updatedUser as any).password;
+    static async update(id: number, data: Partial<User>): Promise<Omit<User, 'password'>> {
+        const user = await this.repo.findOneBy({ id });
+        if (!user) {
+            throw new NotFoundError(`User with ID ${id} not found`);
+        }
 
-        return updatedUser;
+        if (data.email && data.email !== user.email) {
+            const existing = await this.repo.findOneBy({ email: data.email });
+            if (existing) {
+                throw new ConflictError('Email already in use');
+            }
+        }
+
+        const payload = { ...data };
+        if (payload.password) {
+            payload.password = await bcrypt.hash(payload.password, 10);
+        }
+
+        Object.assign(user, payload);
+        const updated = await this.repo.save(user);
+        return this.sanitize(updated);
     }
 
     static async delete(id: number): Promise<void> {
-        const user = await userRepository.findOne({ where: { id } });
-
+        const user = await this.repo.findOneBy({ id });
         if (!user) {
-            throw new NotFoundError('User', id);
+            throw new NotFoundError(`User with ID ${id} not found`);
         }
-
-        await userRepository.remove(user);
+        await this.repo.remove(user);
     }
 }
