@@ -21,10 +21,9 @@ export class AppError extends Error {
 
 export class NotFoundError extends AppError {
     constructor(resource: string, id?: string | number) {
-        const message =
-            id !== undefined
-                ? `${resource} with ID ${id} not found`
-                : `${resource} not found`;
+        const message = id
+            ? `${resource} with ID ${id} not found`
+            : `${resource} not found`;
         super(message, 404, 'NOT_FOUND');
     }
 }
@@ -59,5 +58,11 @@ export class ConflictError extends AppError {
 export class InternalError extends AppError {
     constructor(message = 'An unexpected error occurred') {
         super(message, 500, 'INTERNAL_ERROR', false);
+    }
+}
+
+export class BadRequestError extends AppError {
+    constructor(message: string = 'Bad request', errorCode: string = 'BAD_REQUEST') {
+        super(message, 400, errorCode, true);
     }
 }
